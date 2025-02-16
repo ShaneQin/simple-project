@@ -34,6 +34,7 @@
     window.addEventListener('DOMContentLoaded', onHashChange);
 
     function onHashChange() {
+      console.log(11)
       const routerView = document.getElementById('routerView');
       routes.forEach((item, index) => {
         if (item.path === location.hash) {
