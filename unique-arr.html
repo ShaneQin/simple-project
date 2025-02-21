@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+
+<body>
+  <script>
+    const arr = [
+      { age: 18, name: '老王', like: { n: 1 } },
+      { name: '剑哥', age: 19 },
+      { name: '宇哥', age: 18 },
+      { name: '老王', age: 18, like: { n: 1 } }
+    ];
+    const uniqueArr = (arr) => {
+      const res = [];
+      for (let i = 0; i < arr.length; i++) {
+        let unique = false;
+        for (let j = 0; j < res.length; j++) {
+          if (isSame(arr[i], res[j])) {
+            unique = true;
+            break;
+          }
+        }
+        if (!unique) res.push(arr[i])
+      }
+      return res;
+    }
+    function isSame(v1, v2) {
+      if ((typeof v1 === 'object' && v1 !== null) && (typeof v2 === 'object' && v2 !== null)) {
+        if (Object.keys(v1).length === Object.keys(v2).length) {
+          return Object.keys(v1).every(key => {
+            return isSame(v1[key], v2[key]);
+          });
+        }
+        return false;
+      }
+      return v1 === v2;
+    }
+    console.log(uniqueArr(arr));
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+
+<body>
+  <ul id="list"></ul>
+  <script>
+    const list = document.querySelector('#list');
+    const total = 100;
+    const data = Array.from({ length: total }, (_, k) => `第${k + 1}条数据`);
+    const once = 20;
+    const group = total / once;
+    let index = 0;
+    const renderData = () => {
+      setTimeout(() => {
+        const temp = data.slice(index * once, index * once + once);
+        for (let i = 0; i < temp.length; i++) {
+          const li = document.createElement('li');
+          li.innerText = temp[i];
+          list.appendChild(li);
+        }
+        if (++index < group) {
+          renderData();
+        }
+      });
+    }
+    renderData();
+  </script>
+</body>
+
+</html>
