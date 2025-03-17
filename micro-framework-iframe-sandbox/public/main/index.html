@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+</head>
+
+<body>
+  <h1>Hello，Sandbox Script!</h1>
+  <!-- 主应用导航 -->
+  <div id="nav"></div>
+  <!-- 主应用内容区 -->
+  <div id="container">
+  </div>
+  <script>
+    /* 
+     * MainApp：负责管理主应用，包括获取微应用列表、创建微应用的导航、切换微应用
+     * MicroApps：负责维护微应用列表，包括预加载、添加和删除微应用等
+     * MicroApp：负责维护微应用，包括请求和缓存静态资源、激活微应用、状态管理等
+     * MicroAppSandbox：负责维护微应用隔离，包括创建、激活和销毁隔离实例等 
+     */
+
+    // 隔离类
+    class MicroAppSandbox {
+      // 配置信息
+      options = null;
+      // iframe 实例
+      iframe = null;
+      // iframe 的 Window 实例
+      iframeWindow = null;
+      // 是否执行过 JS
+      execScriptFlag = false;
+      constructor(options) {
+        this.options = options;
+        // 创建 iframe 时浏览器会创建新的全局执行上下文，用于隔离主应用的全局执行上下文
+        this.iframe = this.createIframe();
+        this.iframeWindow = this.iframe.contentWindow;
+        this.proxyIframeWindow();
+      }
+      createIframe() {
+        const { rootElm, id, url } = this.options;
+        const iframe = document.createElement('iframe');
+        // 创建一个空白的 iframe
+        const attrs = {
+          src: 'blank.html',
+          'app-id': id,
+          'app-src': url,
+          style: 'border:none;width:100%;height:100%;',
+        }
+        Object.keys(attrs).forEach(name => {
+          iframe.setAttribute(name, attrs[name]);
+        });
+        rootElm?.appendChild(iframe);
+        return iframe;
+      }
+      isBoundedFunction(fn) {
+        // 被绑定的函数本身没有 prototype
+        return fn.name.indexOf('bound ') === 0 && !fn.hasOwnProperty('prototype');
+      }
+      isConstructable(fn) {
+        // 可以识别 Object、Array 等原生构造函数，也可以识别用户自己创建的构造函数
+        return fn.prototype &&
+          // 通常情况下构造函数和类的 prototype.constructor 指向本身
+          fn.prototype.constructor === fn &&
+          // 通常情况下构造函数和类都会存在 prototype.constructor，因此长度至少大于 1
+          // 需要注意普通函数中也会存在 prototype.constructor，
+          // 因此如果 prototype 有自定义属性或者方法，那么可以判定为类或者构造函数，因此这里的判断是大于 1
+          // 注意不要使用 Object.keys 进行判断，Object.keys 无法获取 Object.defineProperty 定义的属性
+          Object.getOwnPropertyNames(fn.prototype).length > 1
+        // TODO: 没有 constructor 的构造函数识别、class 识别、function Person() {} 识别等
+        // 例如 function Person {};  Person.prototype = {}; 此时没有 prototype.constructor 属性
+      }
+      // 修复 window.alert、window.addEventListener 等报错 Illegal invocation 的问题
+      // window.alert 内部的 this 不是指向 iframe 的 window，而是指向被代理后的 proxy，因此在调用 alert 等原生函数会报错 Illegal invocation
+      // 因此这里需要重新将这些原生 native api 的 this 修正为 iframe 的 window
+      getTargetValue(target, prop) {
+        const value = target[prop];
+        // 过滤出 window.alert、window.addEventListener 等 API
+        if (typeof value === 'function' && !this.isBoundedFunction(value) && !this.isConstructable(value)) {
+          console.log('修正 this: ', prop);
+          const boundValue = Function.prototype.bind.call(value, target);
+          // 重新恢复 value 在 bound 之前的属性和原型（bind 之后会丢失）
+          for (const key in value) {
+            boundValue[key] = value[key];
+          }
+          // 如果原来的函数存在 prototype 属性，而 bound 之后丢失了，那么重新设置回来
+          if (value.hasOwnProperty('prototype') && !boundValue.hasOwnProperty('prototype')) {
+            boundValue.prototype = value.prototype;
+          }
+          return boundValue;
+        }
+        return value;
+      }
+      // 激活
+      async active() {
+        this.iframe.style.display = 'block';
+        // 如果已经通过 Script 加载并执行过 JS，则无需重新加载处理
+        if (this.exec) return;
+        // 延迟等待 iframe 加载完成（这里会有 HTML 请求的性能损耗，可以进行优化处理）
+        await this.iframeLoadDeferred.promise;
+        this.exec = true;
+        const scriptElement = this.iframeWindow.document.createElement('script');
+        scriptElement.textContent = this.options.scriptText;
+        this.iframeWindow.document.head.appendChild(scriptElement);
+      }
+      // 失活
+      // INFO: JS 加载以后无法通过移除 Script 标签去除执行状态
+      // INFO: 因此这里不是指代失活 JS，如果是真正想要失活 JS，需要销毁 iframe 后重新加载 Script
+      inactive() {
+        this.iframe.style.display = 'none';
+      }
+      // 销毁隔离实例
+      destroy() {
+        this.options = null;
+        this.exec = false;
+        if (this.iframe) {
+          this.iframe.parentNode?.removeChild(this.iframe);
+        }
+        this.iframe = null;
+      }
+    }
+
+    class MicroApp {
+      // 缓存微应用的脚本文本（这里假设只有一个执行脚本）
+      scriptText = '';
+      // 隔离实例
+      sandbox = null;
+      // 微应用挂载的根节点
+      rootElm = null;
+      constructor(rootElm, app) {
+        this.rootElm = rootElm;
+        this.app = app;
+      }
+      // 获取 JS 文本（微应用服务需要支持跨域请求获取 JS 文件）
+      async fetchScript(src) {
+        try {
+          const res = await window.fetch(src);
+          return await res.text();
+        } catch (err) {
+          console.log(err);
+        }
+      }
+      // 激活
+      async active() {
+        // 缓存资源处理
+        if (!this.scriptText) {
+          this.scriptText = await this.fetchScript(this.app.script);
+        }
+        // 如果没有创建隔离实例，则实时创建
+        // 需要注意只给激活的微应用创建 iframe 隔离，因为创建 iframe 会产生内存损耗
+        if (!this.sandbox) {
+          this.sandbox = new MicroAppSandbox({
+            rootElm: this.rootElm,
+            scriptText: this.scriptText,
+            url: this.app.scrtipt,
+            id: this.app.id
+          });
+        }
+        this.sandbox.active();
+      }
+      // 失活
+      inactive() {
+        this.sandbox?.inactive();
+      }
+    }
+
+    // 微前端管理
+    class MicroApps {
+      // 微应用实例映射表
+      appsMap = new Map();
+      // 微应用挂载的根节点信息
+      rootElm = null;
+      constructor(rootElm, apps) {
+        this.rootElm = rootElm;
+        this.setAppMaps(apps);
+      }
+      setAppMaps(apps) {
+        apps.forEach(app => {
+          this.appsMap.set(app.id, new MicroApp(this.rootElm, app));
+        });
+      }
+      // TODO: prefetch 微应用
+      prefetchApps() { }
+      // 激活微应用
+      activeApp(id) {
+        const app = this.appsMap.get(id);
+        app?.active();
+      }
+      // 失活微应用
+      inactiveApp(id) {
+        const app = this.appsMap.get(id);
+        app?.inactive();
+      }
+    }
+    // 主应用管理
+    class MainApp {
+      microApps = [];
+      microAppsManager = null;
+      constructor() {
+        this.init();
+      }
+      async init() {
+        this.microApps = await this.fetchMicroApps();
+        this.createNav();
+        this.navClickListener();
+        this.hashChangeListener();
+        // 创建微前端管理实例
+        this.microAppsManager = new MicroApps(
+          document.getElementById('container'),
+          this.microApps
+        )
+      }
+      async fetchMicroApps() {
+        try {
+          const res = await window.fetch('/microapps', {
+            method: 'post'
+          });
+          return await res.json();
+        } catch (err) {
+          console.log(err);
+        }
+      }
+      createNav(microApps) {
+        const fragment = new DocumentFragment();
+        this.microApps?.forEach(microApp => {
+          // TODO: APP 数据规范检测 (例如是否有 script）
+          const button = document.createElement('button');
+          button.textContent = microApp.name;
+          button.id = microApp.id;
+          fragment.appendChild(button);
+        });
+        nav.appendChild(fragment);
+      }
+      navClickListener() {
+        const nav = document.getElementById('nav');
+        nav.addEventListener('click', e => {
+          // 并不是只有 button 可以触发导航变更，例如 a 标签也可以，因此这里不直接处理微应用切换，只是改变 Hash 地址
+          // 不会触发刷新，类似于框架的 Hash 路由
+          window.location.hash = e?.target?.id;
+        });
+      }
+      // hash 路由变化的监听事件
+      hashChangeListener() {
+        // 监听 Hash 路由的变化，切换微应用（这里设定一个时刻只能切换一个微应用）
+        window.addEventListener('hashchange', () => {
+          this.microApps?.forEach(async ({ id }) => {
+            id === window.location.hash.replace('#', '')
+              ? this.microAppsManager.activeApp(id)
+              : this.microAppsManager.inactiveApp(id);
+          });
+        });
+      }
+    }
+    new MainApp();
+  </script>
+</body>
+
+</html>
